@@ -33,7 +33,7 @@ function getStaticFromIdentity(mmsi) {
 app.use(express.static(path.join(__dirname, 'myapp/browser')));
 
 app.get('/api/v2/all-data', async (req, res) => {
-  const { polygon, startDate, endDate, page = 1, limit = 200 } = req.query;
+  const { polygon, startDate, endDate } = req.query;
 
   if (!polygon || !startDate || !endDate) {
     return res.status(400).json({ error: 'Missing required parameters: polygon, startDate, endDate' });
@@ -62,16 +62,13 @@ app.get('/api/v2/all-data', async (req, res) => {
     return res.status(400).json({ error: 'Invalid date format' });
   }
 
-  const pageInt = Math.max(1, parseInt(page));
-  const limitInt = Math.min(500, parseInt(limit));
-  const skip = (pageInt - 1) * limitInt;
-
   let client;
   try {
     client = await MongoClient.connect(uri);
     const db = client.db('maritim');
     const collection = db.collection('ais');
 
+    // Ambil semua data tanpa limit dan skip
     const aggregationPipeline = [
       {
         $match: {
@@ -84,60 +81,50 @@ app.get('/api/v2/all-data', async (req, res) => {
             }
           },
           created_at: { $gte: start, $lte: end },
-          aistype: { $nin: [5, 24] }
+          aistype: { $nin: [5, 24] }  // sesuaikan jika ingin semua tipe
         }
       },
       {
-        $facet: {
-          metadata: [{ $count: "total" }],
-          data: [
-            { $sort: { created_at: -1 } },
-            { $skip: skip },
-            { $limit: limitInt },
+        $sort: { created_at: -1 }
+      },
+      {
+        $lookup: {
+          from: "ship",
+          let: { mmsi: "$mmsi" },
+          pipeline: [
             {
-              $lookup: {
-                from: "ship",
-                let: { mmsi: "$mmsi" },
-                pipeline: [
-                  {
-                    $match: {
-                      $expr: {
-                        $eq: ["$MMSI", "$$mmsi"]
-                      }
-                    }
-                  },
-                  {
-                    $project: {
-                      IMO: 1,
-                      MMSI: 1,
-                      NAME: 1,
-                      BUILT: 1,
-                      FLAG: 1,
-                      FLAGNAME: 1,
-                      TYPE: 1,
-                      TYPENAME: 1,
-                      GT: 1,
-                      DWT: 1,
-                      LOA: 1,
-                      BEAM: 1,
-                      DRAUGHT: 1,
-                      CLASS: 1,
-                      CLASSCODE: 1
-                    }
-                  }
-                ],
-                as: "static"
+              $match: {
+                $expr: { $eq: ["$MMSI", "$$mmsi"] }
+              }
+            },
+            {
+              $project: {
+                IMO: 1,
+                MMSI: 1,
+                NAME: 1,
+                BUILT: 1,
+                FLAG: 1,
+                FLAGNAME: 1,
+                TYPE: 1,
+                TYPENAME: 1,
+                GT: 1,
+                DWT: 1,
+                LOA: 1,
+                BEAM: 1,
+                DRAUGHT: 1,
+                CLASS: 1,
+                CLASSCODE: 1
               }
             }
-          ]
+          ],
+          as: "static"
         }
       }
     ];
 
     const result = await collection.aggregate(aggregationPipeline).toArray();
 
-    const data = result[0].data.map(item => {
-      // Ambil data statis dari koleksi ship jika ada
+    const data = result.map(item => {
       let staticData = {};
       if (item.static && item.static.length > 0) {
         staticData = {
@@ -158,30 +145,23 @@ app.get('/api/v2/all-data', async (req, res) => {
           CLASSCODE: item.static[0].CLASSCODE || "-"
         };
       } else {
-        // Jika tidak ada, fallback ke identity.json
-        const fallback = getStaticFromIdentity(item.mmsi);
-        if (fallback) {
-          staticData = fallback;
-        } else {
-          // Jika tidak ada juga di identity.json, isi default "-"
-          staticData = {
-            IMO: "-",
-            MMSI: "-",
-            NAME: "-",
-            BUILT: "-",
-            FLAG: "-",
-            FLAGNAME: "-",
-            TYPE: "-",
-            TYPENAME: "-",
-            GT: "-",
-            DWT: "-",
-            LOA: "-",
-            BEAM: "-",
-            DRAUGHT: "-",
-            CLASS: "-",
-            CLASSCODE: "-"
-          };
-        }
+        staticData = {
+          IMO: "-",
+          MMSI: "-",
+          NAME: "-",
+          BUILT: "-",
+          FLAG: "-",
+          FLAGNAME: "-",
+          TYPE: "-",
+          TYPENAME: "-",
+          GT: "-",
+          DWT: "-",
+          LOA: "-",
+          BEAM: "-",
+          DRAUGHT: "-",
+          CLASS: "-",
+          CLASSCODE: "-"
+        };
       }
 
       return {
@@ -205,25 +185,21 @@ app.get('/api/v2/all-data', async (req, res) => {
     res.json({
       data,
       pagination: {
-        total: result[0].metadata[0]?.total || 0,
-        page: pageInt,
-        pageSize: limitInt,
-        totalPages: Math.ceil((result[0].metadata[0]?.total || 0) / limitInt)
+        total: data.length,
+        page: 1,
+        pageSize: data.length,
+        totalPages: 1
       }
     });
 
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      details: error.message
-    });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
-    if (client) {
-      client.close();
-    }
+    if (client) await client.close();
   }
 });
+
 
 // Wildcard route untuk SPA Angular
 app.get('/demn', (req, res) => {
